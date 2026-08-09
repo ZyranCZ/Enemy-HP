@@ -19,6 +19,7 @@ HP, which the original never tells you; percentage keeps that unknown.
 
 <img width="812" height="760" alt="image" src="https://github.com/user-attachments/assets/2e1ab541-63ed-40d5-9bb9-1b4e3a948fc6" />
 
+
 **Check out my other mods:**<br>
 * [Autofire A/B + Directional Keys Mod](https://github.com/ZyranCZ/autofire)<br>
 * [Steel and/or Fairy and/or Typing Charts](https://github.com/ZyranCZ/Steel-and-or-Fairy-and-or-Typing-Charts)<br>
@@ -30,6 +31,9 @@ HP, which the original never tells you; percentage keeps that unknown.
 * [Trainers Let You Choose Lead Pokemon](https://github.com/ZyranCZ/Trainers-Let-You-Choose-Lead-Pokemon)
 * [Evolve in Battle](https://github.com/ZyranCZ/Evolve-in-Battle)
 * [HELP Story Guide](https://github.com/ZyranCZ/HELP-Story-Guide/)
+* [Professor Oak's Pokémon DV/Stat Appraisal](https://github.com/ZyranCZ/Professor-Oak-DV-STAT-Evaluation)
+
+
 
 
 ## Install
