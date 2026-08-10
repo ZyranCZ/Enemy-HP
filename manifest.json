@@ -1,0 +1,20 @@
+{
+  "id": "enemy_hp",
+  "name": "Enemy HP Readout",
+  "version": "1.0.1",
+  "github": "ZyranCZ/Enemy-HP",
+  "api": 2,
+  "entry": "main.lua",
+  "profile": "content",
+  "category": "UI",
+  "game_version": ">=0.0.0-0 <2.0.0",
+  "priority": 200,
+  "affects_link": false,
+  "dependencies": [],
+  "optional_dependencies": [],
+  "conflicts": [],
+  "description": "Opens a line inside the foe's HUD by dropping its rule one row, and puts the HP there as numbers or a percentage.",
+  "permissions": [
+    "engine_internals"
+  ]
+}
