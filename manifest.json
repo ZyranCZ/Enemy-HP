@@ -1,7 +1,7 @@
 {
   "id": "enemy_hp",
   "name": "Enemy HP Readout",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "github": "ZyranCZ/Enemy-HP",
   "api": 2,
   "entry": "main.lua",

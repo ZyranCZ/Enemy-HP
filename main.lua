@@ -1,5 +1,5 @@
 -- Enemy HP Readout for Gen1Recomp
--- v2.0.0 (stable Gen 1 + Gen 2 / Gold release)
+-- v2.1.0 (stable Gen 1 + Gen 2 / Gold release)
 --
 -- Vanilla path:
 --   Keep the 1.0.1 behavior: move the enemy HUD underline down one tile and
@@ -115,60 +115,57 @@ return function(mod)
   local generation = GameVersion.generation()
   if generation == 2 then
     --------------------------------------------------------------------------
-    -- GOLD / GEN 2 PRESENTATION BACKEND
-    --
-    -- Gold's battle model resolves a whole turn ahead of its presentation
-    -- queue.  The HUD therefore owns shownMon/shownHp, and those are the only
-    -- values safe to present without spoiling damage/healing before the bar
-    -- visibly gets there.  This backend is deliberately read-only.
+    -- GOLD / GEN 2 ONLY TEST BACKEND — render.hud-only GEN3 integration.
+    -- IMPORTANT: this branch never wraps battle.overlay and never patches any
+    -- Gen3 UI function.  Gen3 v1.4.0 owns the full battle HUD lifecycle; we
+    -- only read the live Gold BattleState from game.stack after Gen3 has drawn
+    -- its frame, then add the numeric enemy HP text as the final overlay.
     --------------------------------------------------------------------------
+    local STRATEGY = "B4: runtime-owner-render-only-transient-lethal-shim"
+    local RENDER_PRIORITY = 12050
     local goldOverlayInstalled = false
     local goldNativeInstalled = false
     local goldLastVisible = false
     local goldLastHp, goldLastMaxHp = nil, nil
     local goldReadoutSource = nil
     local goldLastDrawError = nil
-    -- Once Gold has legitimately revealed the foe HUD for this battle screen,
-    -- keep the numeric readout alive until the battle actually ends.  Vanilla
-    -- transiently hides its HUD during move effects, faint/catch cleanup and
-    -- replacement choreography; those are presentation states, not moments
-    -- where the foe's displayed HP ceases to exist.
+    local goldGen3Installed = false
+    local goldGen3Reason = "not attempted"
+    local goldReplacementUi = nil
     local goldEnemyHudLatched = false
-    local goldLatchedScreen = nil
-    local GOLD_OVERLAY_PRIORITY = 200
 
-    local function legacyShownHP(battler)
-      local shown = battler and battler.shownHP
-      if shown == nil then shown = battler and battler.mon and battler.mon.hp end
-      return shown or 0
+    local function gen3Handle()
+      if type(mod.find) ~= "function" then return nil end
+      local ok, handle = pcall(mod.find, "gen3_battle_ui")
+      if ok then return handle end
+      return nil
     end
 
-    -- Preserve the existing public readout(battle) export for consumers that
-    -- pass the historical Gen 1 battle shape, even on a Gold boot.
-    local function legacyReadout(battle)
-      if not enabled or not battle then return nil end
-      local enemy = battle.enemy
-      local stats = enemy and enemy.mon and enemy.mon.stats
-      local maxHp = stats and stats.hp
-      return formatReadout(legacyShownHP(enemy), maxHp, format)
+    local function runtimeHooks()
+      local ok, Runtime = pcall(require, "src.mods.Runtime")
+      if ok and Runtime and Runtime.hooks then return Runtime.hooks end
+      return nil
     end
 
-    local function goldFallbackReason()
-      if hideOriginalBattleUI then
-        return "HIDE OG UI is Gen1-only until a Gold replacement UI is verified; native Gold HUD kept"
-      end
-      if compatMode ~= NATIVE then
-        return "requested " .. tostring(compatMode) .. " compatibility is not verified on Gold; native Gold HUD used"
+    local function runtimeGen3Entry()
+      local hooks = runtimeHooks()
+      local chain = hooks and hooks.chains and hooks.chains["render.hud"]
+      if type(chain) ~= "table" then return nil end
+      for _, entry in ipairs(chain) do
+        if type(entry) == "table" and type(entry.callback) == "function"
+            and tostring(entry.owner or "") == "gen3_battle_ui" then
+          return entry
+        end
       end
       return nil
     end
 
+    local function gen3Active()
+      return runtimeGen3Entry() ~= nil
+    end
+
     local function displayedEnemy(screen)
       if not screen then return nil, "none" end
-      if type(screen.activeMon) == "function" then
-        local ok, mon = pcall(screen.activeMon, screen, "enemy")
-        if ok and mon ~= nil then return mon, "activeMon(enemy)" end
-      end
       local shown = screen.shownMon and screen.shownMon.enemy
       if shown ~= nil then return shown, "shownMon.enemy" end
       local live = screen.battle and screen.battle.enemy
@@ -176,59 +173,65 @@ return function(mod)
       return nil, "none"
     end
 
-    local function goldVisible(screen)
-      if not enabled or not screen then return false end
-
-      -- A new BattleState instance is a new presentation lifecycle.  Do NOT
-      -- use battle.ended / battle.over / mon.hp here: Gold resolves battle
-      -- logic ahead of its presentation queue, so a lethal hit can already be
-      -- logically finished while shownHp is still draining on screen.
-      if goldLatchedScreen ~= screen then
-        goldLatchedScreen = screen
-        goldEnemyHudLatched = false
+    -- Find the live Gold BattleState without touching battle.overlay.  During
+    -- a normal battle it is the top stack state.  The reverse scan is only a
+    -- defensive fallback; we still require it to own the foreground before
+    -- drawing, matching Gen3 v1.4.0 battleOwnsForeground().
+    local function goldBattleStateFromGame(game)
+      local stack = game and game.stack
+      if not stack then return nil end
+      local top
+      if type(stack.top) == "function" then
+        local ok, value = pcall(stack.top, stack)
+        if ok then top = value end
+      elseif type(stack.states) == "table" then
+        top = stack.states[#stack.states]
       end
 
-      -- Mirror the native enemy HP BAR's own draw gate from Gold
-      -- BattleState:drawHud(), not the logical battle outcome.  This guarantees
-      -- that a lethal hit remains visible at its chased shownHp value all the
-      -- way to 0, and that 0/max (or 0%) remains on screen for as long as the
-      -- native enemy HP bar itself is still being drawn.
-      if screen.showEnemyHud ~= true then return false end
-      if type(screen.hudCleared) == "function" then
-        local ok, cleared = pcall(screen.hudCleared, screen, "enemy")
-        if ok and cleared then return false end
+      local function looksLikeGoldBattleState(value)
+        return type(value) == "table"
+          and type(value.shownHp) == "table"
+          and type(value.shownMon) == "table"
+          and type(value.battle) == "table"
+          and value.showEnemyHud ~= nil
       end
 
-      goldEnemyHudLatched = true
-      return true
+      if looksLikeGoldBattleState(top) then return top, true end
+      if type(stack.states) == "table" then
+        for i = #stack.states, 1, -1 do
+          local state = stack.states[i]
+          if looksLikeGoldBattleState(state) then return state, state == top end
+        end
+      end
+      return nil, false
     end
 
     local function goldView(screen)
-      local view = {
-        mon = nil, hp = nil, maxHp = nil, visible = false,
-        source = nil, generation = 2,
-      }
-      if not goldVisible(screen) then return view end
+      local view = { mon=nil, hp=nil, maxHp=nil, visible=false, source=nil, generation=2 }
+      if not enabled or not screen or screen.showEnemyHud ~= true then return view end
 
+      -- Gen3 UI v1.4.0 intentionally hides BOTH status plates while Gold owns
+      -- the full move-selection screen.  Our numeric readout must disappear in
+      -- exactly the same presentation states instead of floating over that UI.
+      if screen.phase == "moves" or screen.phase == "choose-forget" then
+        return view
+      end
+      if screen.showEnemyTrainer then return view end
+
+      -- Match Gen3 v1.4.0 enemyVisible() rather than Gold's native hudCleared
+      -- flag.  Gen3 intentionally keeps its own status plate alive through
+      -- normal attack presentation even while native Gold presentation flags
+      -- change underneath it.
       local mon, monSource = displayedEnemy(screen)
       if not mon then return view end
       local maxHp = mon.maxHp or (mon.stats and mon.stats.hp)
       if not maxHp or maxHp <= 0 then return view end
 
-      local hp, hpSource
-      if screen.shownHp and screen.shownHp.enemy ~= nil then
-        hp = screen.shownHp.enemy
-        hpSource = "shownHp.enemy"
-      elseif type(screen.hudHp) == "function" then
-        local ok, shown = pcall(screen.hudHp, screen, mon, "enemy")
-        if ok and shown ~= nil then
-          hp = shown
-          hpSource = "hudHp(enemy) fallback"
-        end
-      end
+      local hp = screen.shownHp and screen.shownHp.enemy
+      local hpSource = "shownHp.enemy"
       if hp == nil then
         hp = mon.hp or 0
-        hpSource = "displayedMon.hp defensive fallback"
+        hpSource = "displayedMon.hp fallback"
       end
 
       view.mon = mon
@@ -239,165 +242,234 @@ return function(mod)
       return view
     end
 
-    local function readoutForScreen(screen)
+    local function readoutForScreen(screen, spaced)
       local view = goldView(screen)
       if not view.visible then return nil, view end
-      return formatReadout(view.hp, view.maxHp, format), view
+      if format == PERCENT then
+        local pct = view.hp <= 0 and 0 or math.max(1, math.floor(view.hp * 100 / view.maxHp))
+        return ("%d%%"):format(pct), view
+      end
+      if spaced then return ("%d / %d"):format(view.hp, view.maxHp), view end
+      return ("%d/%d"):format(view.hp, view.maxHp), view
     end
 
-    local function drawGoldNativeRow(screen, figure)
-      local G = love and love.graphics
-      if not (G and G.setColor and G.rectangle and type(Font.draw) == "function") then
-        return false, "Gold graphics primitives unavailable"
-      end
+    local function legacyReadout(battle)
+      if not enabled or not battle then return nil end
+      local enemy = battle.enemy
+      local mon = enemy and enemy.mon
+      local maxHp = mon and mon.stats and mon.stats.hp
+      local hp = enemy and enemy.shownHP
+      if hp == nil then hp = mon and mon.hp end
+      return formatReadout(hp or 0, maxHp, format)
+    end
 
+    local function gen3Scale()
+      local g = love and love.graphics
+      if not (g and g.getDimensions) then return nil end
+      local sw, sh = g.getDimensions()
+      local raw = math.min(sw / 430, sh / 245)
+      if raw <= 4.5 then return math.max(2.85, math.min(raw, 3.85)) end
+      return math.max(3.85, math.min(3.85 + (raw - 4.5) * 0.72, 7.0))
+    end
+
+    local gen3Fonts = {}
+    local function gen3Font(size)
+      local g = love and love.graphics
+      if not g then return nil end
+      local px = math.max(4, math.floor(math.max(4, (tonumber(size) or 4) * 1.08) + 0.5))
+      if gen3Fonts[px] then return gen3Fonts[px] end
+      local okFont, EngineFont = pcall(require, "src.render.Font")
+      if okFont and EngineFont and EngineFont.PLAINPIXEL and type(g.newFont) == "function" then
+        local ok, f = pcall(g.newFont, EngineFont.PLAINPIXEL, px, "normal")
+        if ok and f then
+          if f.setFilter then pcall(f.setFilter, f, "linear", "linear") end
+          gen3Fonts[px] = f
+          return f
+        end
+      end
+      return g.getFont and g.getFont() or nil
+    end
+
+    local function drawGen3Number(game, screen, ownsForeground)
+      if not ownsForeground then return false end
+      local figure, view = readoutForScreen(screen, true)
+      if not figure then return false end
+      local s = gen3Scale()
+      local g = love and love.graphics
+      if not (s and g and g.setColor) then return false end
+
+      -- A/B previously changed graphics state directly after Gen3 drew.  Keep
+      -- this overlay fully isolated so no font/color/transform/shader/scissor
+      -- can leak into the following battle frame.
       local pushed = false
-      if type(G.push) == "function" and type(G.pop) == "function" then
-        local ok = pcall(G.push, "all")
-        if not ok then ok = pcall(G.push) end
+      if type(g.push) == "function" and type(g.pop) == "function" then
+        local ok = pcall(g.push, "all")
+        if not ok then ok = pcall(g.push) end
         pushed = ok and true or false
       end
 
       local ok, err = pcall(function()
-        -- Native enemy frame: side is at row 2, bottom rule at row 3.  Keep the
-        -- existing row-2 side, erase only the old bottom row, then redraw the
-        -- same frame shifted one tile so its side continues through our new
-        -- numeric row and its bottom rule lands at row 4.
-        G.setColor(1, 1, 1, 1)
-        G.rectangle("fill", 8, 24, 88, 8)
-
-        local shifted = false
-        local hud = screen and screen.hud
-        if hud and type(hud.available) == "function"
-            and type(hud.drawEnemyFrame) == "function"
-            and type(G.translate) == "function" then
-          local available = false
-          local okAvail, value = pcall(hud.available, hud)
-          if okAvail then available = value and true or false end
-          if available then
-            G.translate(0, 8)
-            hud:drawEnemyFrame()
-            G.translate(0, -8)
-            shifted = true
-          end
+        local f = gen3Font(4.4 * s)
+        if f and g.setFont then g.setFont(f) end
+        local x, y = 7*s, 7*s
+        local tx, ty, tw = x+51*s, y+21.8*s, 53*s
+        local color = {0.11,0.12,0.11,1}
+        local shadow = {0.14,0.16,0.13,0.24}
+        if g.printf then
+          g.setColor(shadow); g.printf(figure, tx+1, ty+1, tw, "right")
+          g.setColor(color); g.printf(figure, tx, ty, tw, "right")
+          g.printf(figure, tx+0.45, ty, tw, "right")
+        elseif g.print then
+          g.setColor(color); g.print(figure, tx, ty)
         end
-        if not shifted and screen and type(screen.drawFrame) == "function" then
-          screen:drawFrame(1, 4, 10, false)
-          shifted = true
-        end
-        if not shifted then
-          -- Last-resort shape is the exact fallback geometry Gold itself uses.
-          G.setColor(0, 0, 0, 1)
-          G.rectangle("fill", 8, 32, 80, 2)
-          G.rectangle("fill", 8, 24, 2, 10)
-        end
-
-        local width
-        if type(Font.width) == "function" then
-          local okWidth, measured = pcall(Font.width, figure)
-          if okWidth and type(measured) == "number" then width = measured end
-        end
-        width = width or (#figure * 8)
-        G.setColor(0, 0, 0, 1)
-        Font.draw(figure, 88 - width - 8, 24)
       end)
+      if pushed then pcall(g.pop) end
+      if not ok then
+        goldLastDrawError = tostring(err)
+        return false
+      end
 
-      if pushed then pcall(G.pop) end
-      if not ok then return false, tostring(err) end
+      goldLastVisible = true
+      goldLastHp, goldLastMaxHp = view.hp, view.maxHp
+      goldReadoutSource = view.source
+      goldReplacementUi = "gen3"
+      goldEnemyHudLatched = true
+      goldLastDrawError = nil
       return true
+    end
+
+    -- Gen3 UI v1.4.0 derives its Gold proxy's `enemy.fainted` from
+    -- shownMon.enemy.hp / battle.enemy.hp (logical HP), even though its actual
+    -- HP bar is rendered from shownHp.enemy (presentation HP). On a lethal hit
+    -- logical HP reaches 0 first, so Gen3 hides the whole enemy plate while the
+    -- visible bar is still draining.
+    --
+    -- Do NOT patch Gen3 internals. For the duration of its render.hud call only,
+    -- make the displayed enemy look non-fainted to presentation code, then
+    -- restore the exact values immediately after `next()`. drawStyledHP still
+    -- receives shownHP from shownHp.enemy, so the bar/readout continues  ... -> 0.
+    local function beginLethalPresentationShim(screen, ownsForeground)
+      if not ownsForeground or not screen or screen.showEnemyHud ~= true then
+        return nil
+      end
+      if screen.phase == "moves" or screen.phase == "choose-forget" then
+        return nil
+      end
+
+      local shownMon = screen.shownMon and screen.shownMon.enemy or nil
+      local liveMon = screen.battle and screen.battle.enemy or nil
+      local shownHp = screen.shownHp and screen.shownHp.enemy or nil
+
+      -- Only intervene after battle logic has committed a lethal result while
+      -- the presentation HUD is still alive. Non-lethal frames remain untouched.
+      local displayed = shownMon or liveMon
+      if not displayed or (tonumber(displayed.hp) or 0) > 0 then return nil end
+      if shownHp == nil then return nil end
+
+      local oldShown = shownMon and shownMon.hp or nil
+      local oldLive = liveMon and liveMon.hp or nil
+      if shownMon then shownMon.hp = 1 end
+      if liveMon and liveMon ~= shownMon then liveMon.hp = 1 end
+
+      return function()
+        if shownMon then shownMon.hp = oldShown end
+        if liveMon and liveMon ~= shownMon then liveMon.hp = oldLive end
+      end
+    end
+
+    local function installStrategy()
+      goldGen3Installed = gen3Active()
+      goldGen3Reason = goldGen3Installed and "Runtime owner gen3_battle_ui active; render.hud-only overlay + transient lethal presentation shim; no battle.overlay hook" or "Runtime owner not found"
+      return goldGen3Installed
     end
 
     if mod.hooks and type(mod.hooks.wrap) == "function" then
       local ok, err = pcall(function()
-        mod.hooks:wrap("battle.overlay", function(next, screen, ...)
-          local result = next(screen, ...)
-          local figure, view = readoutForScreen(screen)
-          goldLastVisible = view.visible and true or false
-          goldLastHp = view.hp
-          goldLastMaxHp = view.maxHp
-          goldReadoutSource = view.source
-          if figure then
-            local drawn, drawErr = drawGoldNativeRow(screen, figure)
-            goldNativeInstalled = drawn or goldNativeInstalled
-            goldLastDrawError = drawErr
+        mod.hooks:wrap("render.hud", function(next, game, viewport)
+          -- Keep A2/B2's proven render-only integration. The only pre-next
+          -- action is a reversible presentation-only lethal shim so Gen3 v1.4
+          -- does not mistake already-committed logical HP=0 for the end of the
+          -- still-visible enemy HUD animation.
+          installStrategy()
+          local beforeScreen, beforeOwns = goldBattleStateFromGame(game)
+          local restore
+          if goldGen3Installed and beforeScreen then
+            restore = beginLethalPresentationShim(beforeScreen, beforeOwns)
+          end
+
+          local okNext, result = pcall(next, game, viewport)
+          if restore then pcall(restore) end
+          if not okNext then error(result) end
+
+          installStrategy()
+          if goldGen3Installed then
+            local screen, ownsForeground = goldBattleStateFromGame(game)
+            if screen then drawGen3Number(game, screen, ownsForeground) end
           end
           return result
-        end, GOLD_OVERLAY_PRIORITY)
+        end, RENDER_PRIORITY)
       end)
       goldOverlayInstalled = ok
-      if not ok then
-        goldLastDrawError = tostring(err)
-        if mod.log and mod.log.warn then
-          mod.log:warn("Enemy HP: Gold battle.overlay could not be installed: " .. tostring(err))
-        end
-      end
+      if not ok then goldLastDrawError = tostring(err) end
     end
+    installStrategy()
 
-    local function clearGoldDiagnostics()
-      goldLastVisible = false
-      goldLastHp, goldLastMaxHp = nil, nil
-      goldReadoutSource = nil
-      goldLastDrawError = nil
+    local function clearDiagnostics()
+      goldLastVisible=false
+      goldLastHp=nil
+      goldLastMaxHp=nil
+      goldReadoutSource=nil
+      goldLastDrawError=nil
+      goldEnemyHudLatched=false
     end
-
-    local function beginGoldBattle()
-      clearGoldDiagnostics()
-      goldEnemyHudLatched = false
-      goldLatchedScreen = nil
-    end
-
-    local function noteGoldBattleEnded()
-      -- battle.ended is a LOGIC boundary on Gold, not the visual lifetime of
-      -- its BattleState.  In particular a lethal attack can reach this event
-      -- before shownHp has chased to zero.  Never suppress the overlay here.
-      clearGoldDiagnostics()
-    end
-
-    mod.events:on("battle.started", beginGoldBattle)
-    mod.events:on("battle.ended", noteGoldBattleEnded)
+    mod.events:on("battle.started", function()
+      clearDiagnostics()
+      pcall(installStrategy)
+    end)
+    mod.events:on("battle.ended", clearDiagnostics)
 
     mod.exports.readout = legacyReadout
-    mod.exports.readoutForScreen = readoutForScreen
+    mod.exports.readoutForScreen = function(screen) return readoutForScreen(screen, false) end
     mod.exports.ruleMoved = function() return false end
     mod.exports.compat = {
-      version = 5,
-      -- Legacy Gen 1 diagnostics remain present with safe Gold semantics.
-      gen3Integration = "Gen1-only on Gold",
-      gen3DirectInstalled = function() return false end,
-      gen3DirectReason = function() return goldFallbackReason() or "Gen3 private integration is Gen1-only" end,
-      gen3HideBridgeInstalled = function() return false end,
-      gen3HideBridgeReason = function() return "Gen1-only on Gold" end,
-      hideOriginalBattleUI = function() return hideOriginalBattleUI end,
-      hardHideInstalled = function() return false end,
-      hardHideDramalessInstalled = function() return false end,
-      hardHideReason = function() return "Gen1 hard-hide stack is intentionally not installed on Gold" end,
-      finalNativeSuppressor = function() return false end,
-      finalDramalessSuppressor = function() return false end,
-      v12NativeKillSwitch = function() return false end,
-      v12DramalessKillSwitch = function() return false end,
-      primitiveHudKill = function() return false end,
-      hpBarPrimitiveKill = function() return false end,
-      hpBarIdentityPatchCount = function() return 0 end,
-      patchCapturedHPBarReferences = function() return false end,
-      compatibilityMode = function() return compatMode end,
-      renderHookPriority = 12000,
-      overlayInstalled = function() return false end,
-      nativeAnchorSeen = function() return false end,
-      enemyHudExpected = legacyEnemyHudExpected,
-      -- v5 generation-aware diagnostics.
-      generation = 2,
-      backend = "gold",
-      goldNativeInstalled = function() return goldNativeInstalled end,
-      goldOverlayInstalled = function() return goldOverlayInstalled end,
-      goldOverlayPriority = GOLD_OVERLAY_PRIORITY,
-      goldReadoutSource = function() return goldReadoutSource end,
-      goldLastVisible = function() return goldLastVisible end,
-      goldLastHp = function() return goldLastHp end,
-      goldLastMaxHp = function() return goldLastMaxHp end,
-      goldEnemyHudLatched = function() return goldEnemyHudLatched end,
-      goldReplacementUi = function() return nil end,
-      goldFallbackReason = goldFallbackReason,
-      goldLastDrawError = function() return goldLastDrawError end,
+      version=7,
+      generation=2, backend="gold", testStrategy=STRATEGY,
+      compatibilityMode=function() return compatMode end,
+      gen3Integration=STRATEGY,
+      gen3DirectInstalled=function() return goldGen3Installed end,
+      gen3DirectReason=function() return goldGen3Reason end,
+      gen3CaptureInstalled=function() return false end,
+      gen3CaptureHookInstalled=function() return false end,
+      gen3CaptureReason=function() return goldGen3Reason end,
+      gen3HideBridgeInstalled=function() return false end,
+      gen3HideBridgeReason=function() return "not used: render.hud-only Gold integration" end,
+      hideOriginalBattleUI=function() return hideOriginalBattleUI end,
+      hardHideInstalled=function() return false end,
+      hardHideDramalessInstalled=function() return false end,
+      hardHideReason=function() return "Gen1 hard-hide stack is not installed on Gold" end,
+      finalNativeSuppressor=function() return false end,
+      finalDramalessSuppressor=function() return false end,
+      v12NativeKillSwitch=function() return false end,
+      v12DramalessKillSwitch=function() return false end,
+      primitiveHudKill=function() return false end,
+      hpBarPrimitiveKill=function() return false end,
+      hpBarIdentityPatchCount=function() return 0 end,
+      patchCapturedHPBarReferences=function() return false end,
+      renderHookPriority=RENDER_PRIORITY,
+      overlayInstalled=function() return goldOverlayInstalled end,
+      nativeAnchorSeen=function() return false end,
+      goldOverlayPriority=RENDER_PRIORITY,
+      goldReplacementUi=function() return goldReplacementUi end,
+      goldNativeInstalled=function() return goldNativeInstalled end,
+      goldOverlayInstalled=function() return goldOverlayInstalled end,
+      goldLastVisible=function() return goldLastVisible end,
+      goldLastHp=function() return goldLastHp end,
+      goldLastMaxHp=function() return goldLastMaxHp end,
+      goldReadoutSource=function() return goldReadoutSource end,
+      goldLastDrawError=function() return goldLastDrawError end,
+      goldEnemyHudLatched=function() return goldEnemyHudLatched end,
+      goldFallbackReason=function() return goldGen3Installed and nil or goldGen3Reason end,
+      enemyHudExpected=legacyEnemyHudExpected,
     }
     return
   end
