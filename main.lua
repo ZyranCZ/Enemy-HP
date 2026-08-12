@@ -1,5 +1,5 @@
 -- Enemy HP Readout for Gen1Recomp
--- v2.1.0 (stable Gen 1 + Gen 2 / Gold release)
+-- v2.2.0 (Gen 1 + Gen 2 / Gold; Gen3 UI v1.4 compatibility on both generations)
 --
 -- Vanilla path:
 --   Keep the 1.0.1 behavior: move the enemy HUD underline down one tile and
@@ -1360,6 +1360,282 @@ return function(mod)
 
   installGen3Direct()
 
+  -- Gen 3 Inspired UI v1.4+ / GEN 1 render-only integration ---------------
+  --
+  -- v2.1.0's private drawEnemyHUD replacement intentionally targeted the old
+  -- Gen3 UI v1.3 closure layout. v1.4 moved battle presentation behind the
+  -- shared GoldCompat renderer, so that direct patch correctly fails closed.
+  --
+  -- For Gen 1, use the same proven architecture as the Gold B4 backend:
+  --   * identify the live gen3_battle_ui render.hud owner through Runtime;
+  --   * let Gen3 UI render its complete frame first;
+  --   * add only the enemy numeric HP row afterwards;
+  --   * during a lethal drain, temporarily clear ONLY enemy.fainted for the
+  --     duration of Gen3's render pass, then restore it immediately.
+  --
+  -- No Gen3 private functions/upvalues are modified here. The Gen 2 branch
+  -- above returns before this code is reached and therefore remains untouched.
+  local GEN3_V14_RENDER_PRIORITY = 12050
+  local gen3V14OverlayInstalled = false
+  local gen3V14LastVisible = false
+  local gen3V14LastHp, gen3V14LastMaxHp = nil, nil
+  local gen3V14LastReason = "not attempted"
+  local gen3V14LastDrawError = nil
+  local gen3V14ZeroHoldBattle = nil
+  local gen3V14ZeroHoldFrames = 0
+
+  local function gen3V14RuntimeEntry()
+    local okRuntime, Runtime = pcall(require, "src.mods.Runtime")
+    local hooks = okRuntime and Runtime and Runtime.hooks or nil
+    local chain = hooks and hooks.chains and hooks.chains["render.hud"]
+    if type(chain) ~= "table" then return nil end
+    for _, entry in ipairs(chain) do
+      if type(entry) == "table"
+          and type(entry.callback) == "function"
+          and tostring(entry.owner or "") == "gen3_battle_ui" then
+        return entry
+      end
+    end
+    return nil
+  end
+
+  local function gen3V14Active()
+    -- If the legacy v1.3 direct integration succeeded, it already owns the
+    -- in-panel number and this v1.4 render-only path must stay out of the way.
+    return not gen3DirectInstalled and gen3V14RuntimeEntry() ~= nil
+  end
+
+  local function stackTop(game)
+    local stack = game and game.stack
+    if not stack then return nil end
+    if type(stack.top) == "function" then
+      local ok, value = pcall(stack.top, stack)
+      if ok then return value end
+    end
+    local states = stack.states
+    if type(states) == "table" then return states[#states] end
+    return nil
+  end
+
+  local function looksLikeGen1Battle(value)
+    return type(value) == "table"
+      and type(value.enemy) == "table"
+      and type(value.player) == "table"
+      and type(value.enemy.mon) == "table"
+      and value.phase ~= nil
+      and value.shownHp == nil -- excludes the separate Gold BattleState shape
+  end
+
+  local function gen1BattleFromGame(game)
+    local top = stackTop(game)
+    if current and top == current then return current, true end
+    if looksLikeGen1Battle(top) then return top, true end
+    return current, false
+  end
+
+  -- This mirrors Gen3 UI v1.4.0's shouldDrawStatusHUD() + enemyVisible()
+  -- predicates, except that callers may explicitly ignore the premature
+  -- enemy.fainted flag while a lethal HP drain is still being presented.
+  local function gen3V14EnemyVisible(battle, ownsForeground, ignoreFainted)
+    if not ownsForeground or not battle or not battle.enemy then return false end
+    if battle.phase == "moveSelect" or battle.phase == "mimicSelect" then
+      return false
+    end
+    if battle.showEnemyTrainer or battle.enemySendingOut then return false end
+    if (not ignoreFainted) and battle.enemy.fainted then return false end
+    if battle.introBalls then return false end
+    if (battle.introSlide or 0) ~= 0 then return false end
+    if type(battle.growInScale) == "function" then
+      local ok, value = pcall(battle.growInScale, battle, battle.enemy)
+      if ok and value then return false end
+    end
+    return true
+  end
+
+  local function gen1Gen3Figure(battle)
+    if not enabled or not battle or not battle.enemy then return nil, nil, nil end
+    local enemy = battle.enemy
+    local maxHp = enemy.mon and enemy.mon.stats and enemy.mon.stats.hp
+    if not maxHp or maxHp <= 0 then return nil, nil, nil end
+    local hp = enemy.shownHP
+    if hp == nil then hp = enemy.mon and enemy.mon.hp or 0 end
+    hp = math.max(0, math.min(tonumber(hp) or 0, maxHp))
+    if format == PERCENT then
+      local pct = hp <= 0 and 0 or math.max(1, math.floor(hp * 100 / maxHp))
+      return ("%d%%"):format(pct), hp, maxHp
+    end
+    return ("%d / %d"):format(hp, maxHp), hp, maxHp
+  end
+
+  local function gen3V14Scale()
+    local g = love and love.graphics
+    if not (g and g.getDimensions) then return nil end
+    local sw, sh = g.getDimensions()
+    local raw = math.min(sw / 430, sh / 245)
+    if raw <= 4.5 then return math.max(2.85, math.min(raw, 3.85)) end
+    return math.max(3.85, math.min(3.85 + (raw - 4.5) * 0.72, 7.0))
+  end
+
+  local gen3V14Fonts = {}
+  local function gen3V14Font(size)
+    local g = love and love.graphics
+    if not g then return nil end
+    local px = math.max(4,
+      math.floor(math.max(4, (tonumber(size) or 4) * 1.08) + 0.5))
+    if gen3V14Fonts[px] then return gen3V14Fonts[px] end
+    local okFont, EngineFont = pcall(require, "src.render.Font")
+    if okFont and EngineFont and EngineFont.PLAINPIXEL
+        and type(g.newFont) == "function" then
+      local ok, f = pcall(g.newFont, EngineFont.PLAINPIXEL, px, "normal")
+      if ok and f then
+        if f.setFilter then pcall(f.setFilter, f, "linear", "linear") end
+        gen3V14Fonts[px] = f
+        return f
+      end
+    end
+    return g.getFont and g.getFont() or nil
+  end
+
+  local function drawGen1Gen3Number(battle, ownsForeground, lethalPresentation)
+    if not gen3V14EnemyVisible(battle, ownsForeground, lethalPresentation) then
+      return false
+    end
+    local figure, hp, maxHp = gen1Gen3Figure(battle)
+    if not figure then return false end
+    local s = gen3V14Scale()
+    local g = love and love.graphics
+    if not (s and g and g.setColor) then return false end
+
+    local pushed = false
+    if type(g.push) == "function" and type(g.pop) == "function" then
+      local ok = pcall(g.push, "all")
+      if not ok then ok = pcall(g.push) end
+      pushed = ok and true or false
+    end
+
+    local ok, err = pcall(function()
+      local f = gen3V14Font(4.4 * s)
+      if f and g.setFont then g.setFont(f) end
+      local x, y = 7*s, 7*s
+      -- Same enemy-panel geometry as the proven Gold B4 path and Gen3 v1.4.
+      local tx, ty, tw = x+51*s, y+21.8*s, 53*s
+      local color = {0.11,0.12,0.11,1}
+      local shadow = {0.14,0.16,0.13,0.24}
+      if g.printf then
+        g.setColor(shadow); g.printf(figure, tx+1, ty+1, tw, "right")
+        g.setColor(color); g.printf(figure, tx, ty, tw, "right")
+        g.printf(figure, tx+0.45, ty, tw, "right")
+      elseif g.print then
+        g.setColor(color); g.print(figure, tx, ty)
+      end
+    end)
+    if pushed then pcall(g.pop) end
+    if not ok then
+      gen3V14LastDrawError = tostring(err)
+      return false
+    end
+
+    gen3V14LastVisible = true
+    gen3V14LastHp, gen3V14LastMaxHp = hp, maxHp
+    gen3V14LastDrawError = nil
+    return true
+  end
+
+  -- Gen 1 has no Gold-style showEnemyHud presentation latch. enemy.fainted is
+  -- committed before shownHP finishes draining, which is exactly the condition
+  -- that makes Gen3 v1.4 hide the enemy plate on the final hit. Keep the plate
+  -- alive while shownHP is still above zero, plus one completed zero frame so
+  -- the player can actually see 0/max. Then normal Gen3 visibility resumes.
+  local function lethalPresentationActive(battle, ownsForeground)
+    if not gen3V14EnemyVisible(battle, ownsForeground, true) then
+      gen3V14ZeroHoldBattle = nil
+      gen3V14ZeroHoldFrames = 0
+      return false
+    end
+    local enemy = battle.enemy
+    if not (enemy and enemy.fainted) then
+      gen3V14ZeroHoldBattle = nil
+      gen3V14ZeroHoldFrames = 0
+      return false
+    end
+    local hp = tonumber(enemy.shownHP)
+    if hp == nil then hp = enemy.mon and tonumber(enemy.mon.hp) or 0 end
+    hp = hp or 0
+    if hp > 0 then
+      gen3V14ZeroHoldBattle = battle
+      gen3V14ZeroHoldFrames = 1
+      return true
+    end
+    if gen3V14ZeroHoldBattle == battle and gen3V14ZeroHoldFrames > 0 then
+      gen3V14ZeroHoldFrames = gen3V14ZeroHoldFrames - 1
+      return true
+    end
+    return false
+  end
+
+  local function beginGen1LethalShim(battle, ownsForeground)
+    if not lethalPresentationActive(battle, ownsForeground) then return nil, false end
+    local enemy = battle.enemy
+    local oldFainted = enemy.fainted
+    enemy.fainted = false
+    return function()
+      enemy.fainted = oldFainted
+    end, true
+  end
+
+  if mod.hooks and type(mod.hooks.wrap) == "function" then
+    local ok, err = pcall(function()
+      mod.hooks:wrap("render.hud", function(next, game, viewport)
+        gen3V14LastVisible = false
+        local active = gen3V14Active()
+        local beforeBattle, beforeOwns = gen1BattleFromGame(game)
+        local restore, lethalPresentation
+        if active and beforeBattle then
+          restore, lethalPresentation = beginGen1LethalShim(beforeBattle, beforeOwns)
+        end
+
+        local okNext, result = pcall(next, game, viewport)
+        if restore then pcall(restore) end
+        if not okNext then error(result) end
+
+        active = gen3V14Active()
+        if active then
+          local battle, ownsForeground = gen1BattleFromGame(game)
+          if battle then
+            -- Re-evaluate lethal state after the frame. If the pre-next shim was
+            -- active, keep the same visibility decision for our numeric row.
+            local lethal = lethalPresentation
+                or lethalPresentationActive(battle, ownsForeground)
+            drawGen1Gen3Number(battle, ownsForeground, lethal)
+          end
+          gen3V14LastReason = "Runtime owner gen3_battle_ui active; Gen1 render-only numeric overlay + transient lethal fainted shim"
+        else
+          gen3V14LastReason = gen3DirectInstalled
+              and "legacy Gen3 v1.3 direct integration owns the panel"
+              or "gen3_battle_ui render.hud owner not active"
+        end
+        return result
+      end, GEN3_V14_RENDER_PRIORITY)
+    end)
+    gen3V14OverlayInstalled = ok
+    if not ok then
+      gen3V14LastDrawError = tostring(err)
+      gen3V14LastReason = "Gen1 Gen3 v1.4 render-only hook failed"
+    end
+  end
+
+  mod.events:on("battle.started", function()
+    gen3V14LastVisible = false
+    gen3V14LastHp, gen3V14LastMaxHp = nil, nil
+    gen3V14ZeroHoldBattle = nil
+    gen3V14ZeroHoldFrames = 0
+  end)
+  mod.events:on("battle.ended", function()
+    gen3V14LastVisible = false
+    gen3V14ZeroHoldBattle = nil
+    gen3V14ZeroHoldFrames = 0
+  end)
+
   local drawing = false
   local vanillaDraw = Font.draw
 
@@ -1620,10 +1896,18 @@ return function(mod)
   mod.exports.readout = readout
   mod.exports.ruleMoved = function() return ruleMoved end
   mod.exports.compat = {
-    version = 5,
-    gen3Integration = "direct-drawEnemyHUD-replacement-extended-plate",
+    version = 6,
+    gen3Integration = "gen1-v1.4-runtime-owner-render-only + legacy-v1.3-direct",
     gen3DirectInstalled = function() return gen3DirectInstalled end,
     gen3DirectReason = function() return gen3DirectReason end,
+    gen3V14OverlayInstalled = function() return gen3V14OverlayInstalled end,
+    gen3V14Active = gen3V14Active,
+    gen3V14Reason = function() return gen3V14LastReason end,
+    gen3V14LastVisible = function() return gen3V14LastVisible end,
+    gen3V14LastHp = function() return gen3V14LastHp end,
+    gen3V14LastMaxHp = function() return gen3V14LastMaxHp end,
+    gen3V14LastDrawError = function() return gen3V14LastDrawError end,
+    gen3V14RenderPriority = GEN3_V14_RENDER_PRIORITY,
     gen3HideBridgeInstalled = function() return gen3HideBridgeInstalled end,
     gen3HideBridgeReason = function() return gen3HideBridgeReason end,
     hideOriginalBattleUI = function() return hideOriginalBattleUI end,
