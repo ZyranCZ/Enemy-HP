@@ -1,5 +1,5 @@
 -- Enemy HP Readout for Gen1Recomp
--- v2.2.1 (Gen3 UI enemy-number vertical padding balance on both generations)
+-- v2.2.2 (GEN3 enemy panel extension experiment B: replace-drawenemyhud)
 --
 -- Vanilla path:
 --   Keep the 1.0.1 behavior: move the enemy HUD underline down one tile and
@@ -335,7 +335,7 @@ return function(mod)
         local f = gen3Font(4.4 * s)
         if f and g.setFont then g.setFont(f) end
         local x, y = 7*s, 7*s
-        local tx, ty, tw = x+51*s, gen3BalancedNumberY(y, s, f), 53*s
+        local tx, ty, tw = x+51*s, gen3BalancedNumberY(y, s, f) + 3.5*s, 53*s
         local color = {0.11,0.12,0.11,1}
         local shadow = {0.14,0.16,0.13,0.24}
         if g.printf then
@@ -404,6 +404,172 @@ return function(mod)
       goldGen3Installed = gen3Active()
       goldGen3Reason = goldGen3Installed and "Runtime owner gen3_battle_ui active; render.hud-only overlay + transient lethal presentation shim; no battle.overlay hook" or "Runtime owner not found"
       return goldGen3Installed
+    end
+
+
+    local function panelExpUpvalues(fn)
+      local out = {}
+      if type(fn) ~= "function" or not (debug and debug.getupvalue) then return out end
+      for i = 1, 96 do
+        local name, value = debug.getupvalue(fn, i)
+        if not name then break end
+        out[name] = { index = i, value = value }
+      end
+      return out
+    end
+
+    local function panelExpFindEnemyRenderer(root)
+      if not (debug and debug.getupvalue) then return nil end
+      local seen = {}
+      local function walk(value, depth)
+        local kind = type(value)
+        if (kind ~= "function" and kind ~= "table") or depth > 10 or seen[value] then
+          return nil
+        end
+        seen[value] = true
+        if kind == "function" then
+          local ups = panelExpUpvalues(value)
+          if ups.enemyVisible and ups.drawPlate and ups.drawStyledHP and ups.printText then
+            return value, ups
+          end
+          for _, row in pairs(ups) do
+            local fn, found = walk(row.value, depth + 1)
+            if fn then return fn, found end
+          end
+        else
+          for _, child in pairs(value) do
+            if type(child) == "function" or type(child) == "table" then
+              local fn, found = walk(child, depth + 1)
+              if fn then return fn, found end
+            end
+          end
+        end
+        return nil
+      end
+      return walk(root, 0)
+    end
+
+    local function panelExpFindEnemyParent(root)
+      if not (debug and debug.getupvalue) then return nil end
+      local seen = {}
+      local function walk(value, depth)
+        local kind = type(value)
+        if (kind ~= "function" and kind ~= "table") or depth > 10 or seen[value] then
+          return nil
+        end
+        seen[value] = true
+        if kind == "function" then
+          local ups = panelExpUpvalues(value)
+          local row = ups.drawEnemyHUD
+          if row and type(row.value) == "function" then
+            return value, row.index, row.value
+          end
+          for _, u in pairs(ups) do
+            local parent, index, original = walk(u.value, depth + 1)
+            if parent then return parent, index, original end
+          end
+        else
+          for _, child in pairs(value) do
+            if type(child) == "function" or type(child) == "table" then
+              local parent, index, original = walk(child, depth + 1)
+              if parent then return parent, index, original end
+            end
+          end
+        end
+        return nil
+      end
+      return walk(root, 0)
+    end
+
+    local function panelExpNear(a, b, tolerance)
+      return math.abs((tonumber(a) or 0) - (tonumber(b) or 0)) <= (tolerance or 1.5)
+    end
+
+    local function panelExpIsEnemyPlate(x, y, w, h, s)
+      s = tonumber(s) or 1
+      return panelExpNear(x, 7*s, 2.2)
+        and panelExpNear(y, 7*s, 2.2)
+        and panelExpNear(w, 112*s, 3.0)
+        and panelExpNear(h, 31*s, 3.0)
+    end
+
+    local function panelExpMakeRenderer(original, ups)
+      if type(original) ~= "function" or type(ups) ~= "table" then return nil end
+      local enemyVisible = ups.enemyVisible and ups.enemyVisible.value
+      local drawPlate = ups.drawPlate and ups.drawPlate.value
+      local printText = ups.printText and ups.printText.value
+      local displayName = ups.displayName and ups.displayName.value
+      local directBattleGender = ups.directBattleGender and ups.directBattleGender.value
+      local battleNameWidth = ups.battleNameWidth and ups.battleNameWidth.value
+      local GoldCompat = ups.GoldCompat and ups.GoldCompat.value
+      local drawStyledHP = ups.drawStyledHP and ups.drawStyledHP.value
+      local statusText = ups.statusText and ups.statusText.value
+      local statusColor = ups.statusColor and ups.statusColor.value
+      if type(enemyVisible) ~= "function" or type(drawPlate) ~= "function"
+          or type(printText) ~= "function" or type(displayName) ~= "function"
+          or type(drawStyledHP) ~= "function" then
+        return nil
+      end
+      return function(battle, s)
+        if not enemyVisible(battle) then return end
+        local margin = 7*s
+        local w, h = 112*s, 38*s
+        local x, y = margin, margin
+        local b = battle.enemy
+        drawPlate(x, y, w, h, s)
+        local textColor = {0.11,0.12,0.11,1}
+        local enemyName = displayName(b)
+        printText(enemyName, x+7*s, y+2.0*s, 6.4*s, textColor)
+        if type(directBattleGender) == "function" and type(battleNameWidth) == "function"
+            and type(GoldCompat) == "table" and type(GoldCompat.drawGenderIcon) == "function" then
+          local gender = b and b.gender
+          if gender ~= "male" and gender ~= "female" then
+            gender = directBattleGender(battle, "enemy", b)
+          end
+          if gender == "male" or gender == "female" then
+            local nameX = x + 7*s
+            local nameW = battleNameWidth(enemyName, 6.4*s)
+            local gx = math.min(nameX + nameW + 1.5*s, x + 56*s)
+            local gy = y + 5.35*s
+            local iconSize = math.max(9, math.min(12, 3.0*s))
+            GoldCompat.drawGenderIcon(gx, gy, iconSize, gender)
+          end
+        end
+        printText("Lv."..tostring((b.mon and b.mon.level) or "?"),
+                  x+64*s, y+2.2*s, 5.5*s, textColor, "right", 39*s)
+        drawStyledHP(x+7*s, y+14.5*s, 97*s, 7*s, b)
+        if type(statusText) == "function" and type(statusColor) == "function" then
+          local status = statusText(battle, b)
+          if status then
+            local r,g,bb,aa = statusColor(status)
+            printText(status, x+8*s, y+22.0*s, 3.8*s, {r,g,bb,aa})
+          end
+        end
+      end
+    end
+
+    local panelExpBInstalled = false
+    local function panelExpBInstall()
+      if panelExpBInstalled then return true end
+      local entry = runtimeGen3Entry()
+      local root = entry and entry.callback
+      if type(root) ~= "function" or not (debug and debug.setupvalue) then return false end
+      local parent, index, original = panelExpFindEnemyParent(root)
+      if not parent or not index or type(original) ~= "function" then return false end
+      local _, ups = panelExpFindEnemyRenderer(root)
+      local replacement = panelExpMakeRenderer(original, ups)
+      if type(replacement) ~= "function" then return false end
+      local ok = pcall(debug.setupvalue, parent, index, replacement)
+      panelExpBInstalled = ok and true or false
+      return panelExpBInstalled
+    end
+    if mod.hooks and type(mod.hooks.wrap) == "function" then
+      pcall(function()
+        mod.hooks:wrap("render.hud", function(next, game, viewport)
+          if gen3Active() then panelExpBInstall() end
+          return next(game, viewport)
+        end, 12025)
+      end)
     end
 
     if mod.hooks and type(mod.hooks.wrap) == "function" then
@@ -1557,7 +1723,7 @@ return function(mod)
       if f and g.setFont then g.setFont(f) end
       local x, y = 7*s, 7*s
       -- Same enemy-panel geometry as the proven Gold B4 path and Gen3 v1.4.
-      local tx, ty, tw = x+51*s, gen3V14BalancedNumberY(y, s, f), 53*s
+      local tx, ty, tw = x+51*s, gen3V14BalancedNumberY(y, s, f) + 3.5*s, 53*s
       local color = {0.11,0.12,0.11,1}
       local shadow = {0.14,0.16,0.13,0.24}
       if g.printf then
@@ -1620,6 +1786,172 @@ return function(mod)
     return function()
       enemy.fainted = oldFainted
     end, true
+  end
+
+
+  local function panelExpUpvalues(fn)
+    local out = {}
+    if type(fn) ~= "function" or not (debug and debug.getupvalue) then return out end
+    for i = 1, 96 do
+      local name, value = debug.getupvalue(fn, i)
+      if not name then break end
+      out[name] = { index = i, value = value }
+    end
+    return out
+  end
+
+  local function panelExpFindEnemyRenderer(root)
+    if not (debug and debug.getupvalue) then return nil end
+    local seen = {}
+    local function walk(value, depth)
+      local kind = type(value)
+      if (kind ~= "function" and kind ~= "table") or depth > 10 or seen[value] then
+        return nil
+      end
+      seen[value] = true
+      if kind == "function" then
+        local ups = panelExpUpvalues(value)
+        if ups.enemyVisible and ups.drawPlate and ups.drawStyledHP and ups.printText then
+          return value, ups
+        end
+        for _, row in pairs(ups) do
+          local fn, found = walk(row.value, depth + 1)
+          if fn then return fn, found end
+        end
+      else
+        for _, child in pairs(value) do
+          if type(child) == "function" or type(child) == "table" then
+            local fn, found = walk(child, depth + 1)
+            if fn then return fn, found end
+          end
+        end
+      end
+      return nil
+    end
+    return walk(root, 0)
+  end
+
+  local function panelExpFindEnemyParent(root)
+    if not (debug and debug.getupvalue) then return nil end
+    local seen = {}
+    local function walk(value, depth)
+      local kind = type(value)
+      if (kind ~= "function" and kind ~= "table") or depth > 10 or seen[value] then
+        return nil
+      end
+      seen[value] = true
+      if kind == "function" then
+        local ups = panelExpUpvalues(value)
+        local row = ups.drawEnemyHUD
+        if row and type(row.value) == "function" then
+          return value, row.index, row.value
+        end
+        for _, u in pairs(ups) do
+          local parent, index, original = walk(u.value, depth + 1)
+          if parent then return parent, index, original end
+        end
+      else
+        for _, child in pairs(value) do
+          if type(child) == "function" or type(child) == "table" then
+            local parent, index, original = walk(child, depth + 1)
+            if parent then return parent, index, original end
+          end
+        end
+      end
+      return nil
+    end
+    return walk(root, 0)
+  end
+
+  local function panelExpNear(a, b, tolerance)
+    return math.abs((tonumber(a) or 0) - (tonumber(b) or 0)) <= (tolerance or 1.5)
+  end
+
+  local function panelExpIsEnemyPlate(x, y, w, h, s)
+    s = tonumber(s) or 1
+    return panelExpNear(x, 7*s, 2.2)
+      and panelExpNear(y, 7*s, 2.2)
+      and panelExpNear(w, 112*s, 3.0)
+      and panelExpNear(h, 31*s, 3.0)
+  end
+
+  local function panelExpMakeRenderer(original, ups)
+    if type(original) ~= "function" or type(ups) ~= "table" then return nil end
+    local enemyVisible = ups.enemyVisible and ups.enemyVisible.value
+    local drawPlate = ups.drawPlate and ups.drawPlate.value
+    local printText = ups.printText and ups.printText.value
+    local displayName = ups.displayName and ups.displayName.value
+    local directBattleGender = ups.directBattleGender and ups.directBattleGender.value
+    local battleNameWidth = ups.battleNameWidth and ups.battleNameWidth.value
+    local GoldCompat = ups.GoldCompat and ups.GoldCompat.value
+    local drawStyledHP = ups.drawStyledHP and ups.drawStyledHP.value
+    local statusText = ups.statusText and ups.statusText.value
+    local statusColor = ups.statusColor and ups.statusColor.value
+    if type(enemyVisible) ~= "function" or type(drawPlate) ~= "function"
+        or type(printText) ~= "function" or type(displayName) ~= "function"
+        or type(drawStyledHP) ~= "function" then
+      return nil
+    end
+    return function(battle, s)
+      if not enemyVisible(battle) then return end
+      local margin = 7*s
+      local w, h = 112*s, 38*s
+      local x, y = margin, margin
+      local b = battle.enemy
+      drawPlate(x, y, w, h, s)
+      local textColor = {0.11,0.12,0.11,1}
+      local enemyName = displayName(b)
+      printText(enemyName, x+7*s, y+2.0*s, 6.4*s, textColor)
+      if type(directBattleGender) == "function" and type(battleNameWidth) == "function"
+          and type(GoldCompat) == "table" and type(GoldCompat.drawGenderIcon) == "function" then
+        local gender = b and b.gender
+        if gender ~= "male" and gender ~= "female" then
+          gender = directBattleGender(battle, "enemy", b)
+        end
+        if gender == "male" or gender == "female" then
+          local nameX = x + 7*s
+          local nameW = battleNameWidth(enemyName, 6.4*s)
+          local gx = math.min(nameX + nameW + 1.5*s, x + 56*s)
+          local gy = y + 5.35*s
+          local iconSize = math.max(9, math.min(12, 3.0*s))
+          GoldCompat.drawGenderIcon(gx, gy, iconSize, gender)
+        end
+      end
+      printText("Lv."..tostring((b.mon and b.mon.level) or "?"),
+                x+64*s, y+2.2*s, 5.5*s, textColor, "right", 39*s)
+      drawStyledHP(x+7*s, y+14.5*s, 97*s, 7*s, b)
+      if type(statusText) == "function" and type(statusColor) == "function" then
+        local status = statusText(battle, b)
+        if status then
+          local r,g,bb,aa = statusColor(status)
+          printText(status, x+8*s, y+22.0*s, 3.8*s, {r,g,bb,aa})
+        end
+      end
+    end
+  end
+
+  local panelExpBInstalled = false
+  local function panelExpBInstall()
+    if panelExpBInstalled then return true end
+    local entry = gen3V14RuntimeEntry()
+    local root = entry and entry.callback
+    if type(root) ~= "function" or not (debug and debug.setupvalue) then return false end
+    local parent, index, original = panelExpFindEnemyParent(root)
+    if not parent or not index or type(original) ~= "function" then return false end
+    local _, ups = panelExpFindEnemyRenderer(root)
+    local replacement = panelExpMakeRenderer(original, ups)
+    if type(replacement) ~= "function" then return false end
+    local ok = pcall(debug.setupvalue, parent, index, replacement)
+    panelExpBInstalled = ok and true or false
+    return panelExpBInstalled
+  end
+  if mod.hooks and type(mod.hooks.wrap) == "function" then
+    pcall(function()
+      mod.hooks:wrap("render.hud", function(next, game, viewport)
+        if gen3V14Active() then panelExpBInstall() end
+        return next(game, viewport)
+      end, 12025)
+    end)
   end
 
   if mod.hooks and type(mod.hooks.wrap) == "function" then
