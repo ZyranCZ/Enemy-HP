@@ -1,5 +1,5 @@
 -- Enemy HP Readout for Gen1Recomp
--- v2.2.0 (Gen 1 + Gen 2 / Gold; Gen3 UI v1.4 compatibility on both generations)
+-- v2.2.1 (Gen3 UI enemy-number vertical padding balance on both generations)
 --
 -- Vanilla path:
 --   Keep the 1.0.1 behavior: move the enemy HUD underline down one tile and
@@ -290,6 +290,29 @@ return function(mod)
       return g.getFont and g.getFont() or nil
     end
 
+    -- Gen3 v1.4 enemy panel vertical rhythm. The green fill itself ends two
+    -- physical pixels above drawStyledHP's outer capsule bottom. Balance the
+    -- numeric row between that green edge and the TOP of the panel's lower
+    -- inner-highlight stroke, using the live font's real line-box height.
+    -- This keeps the visible breathing room above and below the number equal
+    -- at every HUD scale instead of relying on a fixed y offset.
+    local function gen3BalancedNumberY(panelY, s, f)
+      local barTop = panelY + 14.5*s
+      local barH = 7*s
+      local greenBottom = barTop + barH - 2
+      local innerLineW = math.max(1.2, 0.7*s)
+      local lowerInnerEdge = panelY + 27*s - innerLineW*0.5
+      local lineBoxH = (f and f.getHeight and f:getHeight())
+        or math.max(4, 4.4*s*1.08)
+      -- Pixel numerals occupy noticeably less than the font line-box height.
+      -- Use the visual glyph block rather than the full line box so the blank
+      -- band under the HP text matches the band between the green bar and the
+      -- text itself, which is what the user actually sees.
+      local visibleGlyphH = math.max(4, math.floor(lineBoxH * 0.66 + 0.5))
+      local shadowBottom = 1
+      return (greenBottom + lowerInnerEdge - visibleGlyphH - shadowBottom) * 0.5
+    end
+
     local function drawGen3Number(game, screen, ownsForeground)
       if not ownsForeground then return false end
       local figure, view = readoutForScreen(screen, true)
@@ -312,7 +335,7 @@ return function(mod)
         local f = gen3Font(4.4 * s)
         if f and g.setFont then g.setFont(f) end
         local x, y = 7*s, 7*s
-        local tx, ty, tw = x+51*s, y+21.8*s, 53*s
+        local tx, ty, tw = x+51*s, gen3BalancedNumberY(y, s, f), 53*s
         local color = {0.11,0.12,0.11,1}
         local shadow = {0.14,0.16,0.13,0.24}
         if g.printf then
@@ -1496,6 +1519,22 @@ return function(mod)
     return g.getFont and g.getFont() or nil
   end
 
+  -- Same Gen3 v1.4 vertical-spacing rule as the Gold branch above. Measure
+  -- the real rendered font height, then center the numeric row in the band
+  -- between the green HP fill and the lower inner panel stroke.
+  local function gen3V14BalancedNumberY(panelY, s, f)
+    local barTop = panelY + 14.5*s
+    local barH = 7*s
+    local greenBottom = barTop + barH - 2
+    local innerLineW = math.max(1.2, 0.7*s)
+    local lowerInnerEdge = panelY + 27*s - innerLineW*0.5
+    local lineBoxH = (f and f.getHeight and f:getHeight())
+      or math.max(4, 4.4*s*1.08)
+    local visibleGlyphH = math.max(4, math.floor(lineBoxH * 0.66 + 0.5))
+    local shadowBottom = 1
+    return (greenBottom + lowerInnerEdge - visibleGlyphH - shadowBottom) * 0.5
+  end
+
   local function drawGen1Gen3Number(battle, ownsForeground, lethalPresentation)
     if not gen3V14EnemyVisible(battle, ownsForeground, lethalPresentation) then
       return false
@@ -1518,7 +1557,7 @@ return function(mod)
       if f and g.setFont then g.setFont(f) end
       local x, y = 7*s, 7*s
       -- Same enemy-panel geometry as the proven Gold B4 path and Gen3 v1.4.
-      local tx, ty, tw = x+51*s, y+21.8*s, 53*s
+      local tx, ty, tw = x+51*s, gen3V14BalancedNumberY(y, s, f), 53*s
       local color = {0.11,0.12,0.11,1}
       local shadow = {0.14,0.16,0.13,0.24}
       if g.printf then
