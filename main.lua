@@ -1,5 +1,5 @@
 -- Enemy HP Readout for Gen1Recomp
--- v2.2.2 (GEN3 enemy panel extension experiment B: replace-drawenemyhud)
+-- v2.2.3 (restore v2.0.0 vanilla Gold backend; keep GEN3 v2.2.2 path isolated)
 --
 -- Vanilla path:
 --   Keep the 1.0.1 behavior: move the enemy HUD underline down one tile and
@@ -133,6 +133,9 @@ return function(mod)
     local goldGen3Reason = "not attempted"
     local goldReplacementUi = nil
     local goldEnemyHudLatched = false
+    local goldLatchedScreen = nil
+    local goldNativeOverlayInstalled = false
+    local GOLD_NATIVE_OVERLAY_PRIORITY = 200
 
     local function gen3Handle()
       if type(mod.find) ~= "function" then return nil end
@@ -160,8 +163,57 @@ return function(mod)
       return nil
     end
 
+    -- A registered Gen3 render.hud hook does NOT mean its battle UI is on:
+    -- v1.4 keeps the hook registered when the user disables BATTLE UI. Resolve
+    -- its live featureEnabled("revampedBattleUI") predicate through the hook's
+    -- closure graph so vanilla Gold can remain completely independent.
+    local function findNamedFunction(root, target)
+      if not (debug and debug.getupvalue) then return nil end
+      local seen = {}
+      local function walk(value, depth)
+        local kind = type(value)
+        if (kind ~= "function" and kind ~= "table") or depth > 12 or seen[value] then
+          return nil
+        end
+        seen[value] = true
+        if kind == "function" then
+          for i = 1, 96 do
+            local name, child = debug.getupvalue(value, i)
+            if not name then break end
+            if name == target and type(child) == "function" then return child end
+            if type(child) == "function" or type(child) == "table" then
+              local found = walk(child, depth + 1)
+              if found then return found end
+            end
+          end
+        else
+          for _, child in pairs(value) do
+            if type(child) == "function" or type(child) == "table" then
+              local found = walk(child, depth + 1)
+              if found then return found end
+            end
+          end
+        end
+        return nil
+      end
+      return walk(root, 0)
+    end
+
+    local function gen3BattleUiEnabled()
+      local entry = runtimeGen3Entry()
+      if not entry then return false end
+      local featureEnabled = findNamedFunction(entry.callback, "featureEnabled")
+      if type(featureEnabled) == "function" then
+        local ok, value = pcall(featureEnabled, "revampedBattleUI")
+        if ok then return value ~= false end
+      end
+      -- v1.4 defaults BATTLE UI to ON. If a future release changes its closure
+      -- graph, fail toward preserving the already-tested GEN3 integration.
+      return true
+    end
+
     local function gen3Active()
-      return runtimeGen3Entry() ~= nil
+      return gen3BattleUiEnabled()
     end
 
     local function displayedEnemy(screen)
@@ -261,6 +313,143 @@ return function(mod)
       local hp = enemy and enemy.shownHP
       if hp == nil then hp = mon and mon.hp end
       return formatReadout(hp or 0, maxHp, format)
+    end
+
+    --------------------------------------------------------------------------
+    -- VANILLA GOLD FALLBACK — restored from the last known-good v2.0.0 path.
+    -- This path is deliberately separate from every GEN3 compatibility hook.
+    --------------------------------------------------------------------------
+    local function nativeGoldVisible(screen)
+      if not enabled or not screen then return false end
+      if goldLatchedScreen ~= screen then
+        goldLatchedScreen = screen
+        goldEnemyHudLatched = false
+      end
+      if screen.showEnemyHud ~= true then return false end
+      if type(screen.hudCleared) == "function" then
+        local ok, cleared = pcall(screen.hudCleared, screen, "enemy")
+        if ok and cleared then return false end
+      end
+      goldEnemyHudLatched = true
+      return true
+    end
+
+    local function nativeGoldView(screen)
+      local view = { mon=nil, hp=nil, maxHp=nil, visible=false, source=nil, generation=2 }
+      if not nativeGoldVisible(screen) then return view end
+      local mon, monSource = displayedEnemy(screen)
+      if not mon then return view end
+      local maxHp = mon.maxHp or (mon.stats and mon.stats.hp)
+      if not maxHp or maxHp <= 0 then return view end
+      local hp, hpSource
+      if screen.shownHp and screen.shownHp.enemy ~= nil then
+        hp = screen.shownHp.enemy
+        hpSource = "shownHp.enemy"
+      elseif type(screen.hudHp) == "function" then
+        local ok, shown = pcall(screen.hudHp, screen, mon, "enemy")
+        if ok and shown ~= nil then
+          hp = shown
+          hpSource = "hudHp(enemy) fallback"
+        end
+      end
+      if hp == nil then
+        hp = mon.hp or 0
+        hpSource = "displayedMon.hp defensive fallback"
+      end
+      view.mon = mon
+      view.hp = math.max(0, math.min(hp, maxHp))
+      view.maxHp = maxHp
+      view.visible = true
+      view.source = hpSource .. " + " .. monSource
+      return view
+    end
+
+    local function nativeReadoutForScreen(screen)
+      local view = nativeGoldView(screen)
+      if not view.visible then return nil, view end
+      return formatReadout(view.hp, view.maxHp, format), view
+    end
+
+    local function drawGoldNativeRow(screen, figure)
+      local G = love and love.graphics
+      if not (G and G.setColor and G.rectangle and type(Font.draw) == "function") then
+        return false, "Gold graphics primitives unavailable"
+      end
+      local pushed = false
+      if type(G.push) == "function" and type(G.pop) == "function" then
+        local ok = pcall(G.push, "all")
+        if not ok then ok = pcall(G.push) end
+        pushed = ok and true or false
+      end
+      local ok, err = pcall(function()
+        -- Exact v2.0.0 vanilla Gold geometry: extend the enemy frame down one
+        -- tile, then place the numeric row at y=24 one character left of the
+        -- original alignment.
+        G.setColor(1, 1, 1, 1)
+        G.rectangle("fill", 8, 24, 88, 8)
+        local shifted = false
+        local hud = screen and screen.hud
+        if hud and type(hud.available) == "function"
+            and type(hud.drawEnemyFrame) == "function"
+            and type(G.translate) == "function" then
+          local available = false
+          local okAvail, value = pcall(hud.available, hud)
+          if okAvail then available = value and true or false end
+          if available then
+            G.translate(0, 8)
+            hud:drawEnemyFrame()
+            G.translate(0, -8)
+            shifted = true
+          end
+        end
+        if not shifted and screen and type(screen.drawFrame) == "function" then
+          screen:drawFrame(1, 4, 10, false)
+          shifted = true
+        end
+        if not shifted then
+          G.setColor(0, 0, 0, 1)
+          G.rectangle("fill", 8, 32, 80, 2)
+          G.rectangle("fill", 8, 24, 2, 10)
+        end
+        local width
+        if type(Font.width) == "function" then
+          local okWidth, measured = pcall(Font.width, figure)
+          if okWidth and type(measured) == "number" then width = measured end
+        end
+        width = width or (#figure * 8)
+        G.setColor(0, 0, 0, 1)
+        Font.draw(figure, 88 - width - 8, 24)
+      end)
+      if pushed then pcall(G.pop) end
+      if not ok then return false, tostring(err) end
+      return true
+    end
+
+    -- Restore v2.0.0's vanilla Gold battle.overlay path, but gate it off only
+    -- while Gen3's BATTLE UI is genuinely enabled. Merely installing Gen3 UI
+    -- no longer steals the vanilla Enemy HP renderer.
+    if mod.hooks and type(mod.hooks.wrap) == "function" then
+      local ok, err = pcall(function()
+        mod.hooks:wrap("battle.overlay", function(next, screen, ...)
+          local result = next(screen, ...)
+          if not gen3Active() then
+            local figure, view = nativeReadoutForScreen(screen)
+            goldLastVisible = view.visible and true or false
+            goldLastHp = view.hp
+            goldLastMaxHp = view.maxHp
+            goldReadoutSource = view.source
+            goldReplacementUi = nil
+            if figure then
+              local drawn, drawErr = drawGoldNativeRow(screen, figure)
+              goldNativeInstalled = drawn or goldNativeInstalled
+              goldLastDrawError = drawErr
+            end
+          end
+          return result
+        end, GOLD_NATIVE_OVERLAY_PRIORITY)
+      end)
+      goldNativeOverlayInstalled = ok
+      if not ok then goldLastDrawError = tostring(err) end
     end
 
     local function gen3Scale()
@@ -610,6 +799,7 @@ return function(mod)
       goldReadoutSource=nil
       goldLastDrawError=nil
       goldEnemyHudLatched=false
+      goldLatchedScreen=nil
     end
     mod.events:on("battle.started", function()
       clearDiagnostics()
@@ -648,6 +838,9 @@ return function(mod)
       overlayInstalled=function() return goldOverlayInstalled end,
       nativeAnchorSeen=function() return false end,
       goldOverlayPriority=RENDER_PRIORITY,
+      goldNativeOverlayPriority=GOLD_NATIVE_OVERLAY_PRIORITY,
+      goldNativeOverlayInstalled=function() return goldNativeOverlayInstalled end,
+      gen3BattleUiEnabled=gen3BattleUiEnabled,
       goldReplacementUi=function() return goldReplacementUi end,
       goldNativeInstalled=function() return goldNativeInstalled end,
       goldOverlayInstalled=function() return goldOverlayInstalled end,
