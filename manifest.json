@@ -1,7 +1,7 @@
 {
   "id": "enemy_hp",
   "name": "Enemy HP Readout",
-  "version": "2.2.3",
+  "version": "2.3.2",
   "github": "ZyranCZ/Enemy-HP",
   "api": 2,
   "entry": "main.lua",
@@ -16,11 +16,8 @@
     "DRAMALESS_SHAPE"
   ],
   "conflicts": [],
-  "description": "Shows enemy HP as exact values or percentages in Gen 1 and Gen 2/Gold, with compatibility fixes for Original/Vanilla UI, Gen 3 Inspired UI, and Gen1 Modern UI. Includes an optional complete original battle UI hide mode for replacement UIs.",
-  "permissions": [
-    "engine_internals"
-  ],
-  "experimental": false,
+  "description": "Shows enemy HP as exact values or percentages in Gen 1 and Gen 2/Gold, with compatibility modes for Original/Vanilla UI, Gen 3 Inspired UI, and Gen1 Modern UI. Includes an optional complete original battle UI hide mode for replacement UIs.",
+  "permissions": [],
   "games": [
     "gen1",
     "gen2"
