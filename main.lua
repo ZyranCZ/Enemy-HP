@@ -1,5 +1,5 @@
 -- Enemy HP Readout for Gen1Recomp
--- v2.3.2 - public Mod API migration for Gen1Recomp v0.1.86
+-- v2.3.7 - Battle Art + PotatoVoxel 1.6.3 native-row integrations
 --
 -- The native row is drawn through battle.overlay, a shared Gen 1 / Gold
 -- draw seam. Replacement-UI modes are drawn after their render.hud pass.
@@ -92,6 +92,77 @@ return function(mod)
   -- mod is present, active for this game, and loaded successfully.
   local gen3Handle = mod.find("gen3_battle_ui")
   local modernHandle = mod.find("gen1_modern_ui")
+  local battleArtHandle = mod.find("BATTLE_ART_VOXEL_FORK")
+  local potatoHandle = mod.find("potato_voxel") or mod.find("POTATO_VOXEL")
+
+  -- Battle Art 1.9.x exposes two deliberately read-only compatibility seams:
+  -- battleStage identifies the currently staged battle, while its exported
+  -- module namespace provides the exact HUD snap geometry and UI setting
+  -- helpers used by Battle Art itself.  We never mutate either table.
+  local battleArtExports = battleArtHandle and battleArtHandle.exports or nil
+  local battleArtStage = battleArtExports and battleArtExports.battleStage or nil
+  local battleArtLib = battleArtExports and battleArtExports.lib or nil
+
+
+  local function exportedModule(lib, name)
+    local loader = lib and lib.require
+    if type(loader) ~= "function" then return nil end
+    local ok, value = pcall(loader, name)
+    if ok and type(value) == "table" then return value end
+    return nil
+  end
+
+  local battleArtOverworld = exportedModule(battleArtLib, "OverworldBattle")
+  local battleArtUi = exportedModule(battleArtLib, "UiBackplates")
+  local battleArtBattleHud = exportedModule(battleArtLib, "BattleHud")
+
+
+  local function stagedState(handle, stage, overworld, state)
+    if not handle then return nil end
+
+    local stateFn = stage and stage.state
+    if type(stateFn) == "function" then
+      local ok, value = pcall(stateFn, state)
+      if ok and type(value) == "table" and value.staged == true then
+        return value
+      end
+    end
+
+    local battleFn = overworld and overworld.battle
+    if type(battleFn) == "function" then
+      local ok, active = pcall(battleFn)
+      if ok and active ~= nil and (state == nil or active == state) then
+        return { staged = true, battle = active, ready = true }
+      end
+    end
+    return nil
+  end
+
+  local function battleArtStageState(state)
+    return stagedState(battleArtHandle, battleArtStage, battleArtOverworld, state)
+  end
+
+  local function battleArtHudIsInverted()
+    local colorFn = battleArtUi and battleArtUi.hudUsesColor
+    if type(colorFn) == "function" then
+      local ok, usesColor = pcall(colorFn)
+      if ok then return not usesColor end
+    end
+
+    -- Graceful fallback if Battle Art changes/omits the exported module
+    -- namespace. These are its persisted public option keys in 1.9.x.
+    local ok, Game = pcall(require, "src.core.Game")
+    if ok and Game then
+      local options = Game.save and Game.save.options
+      local bucket = options and options.modOptions
+        and options.modOptions.BATTLE_ART_VOXEL_FORK
+      if type(bucket) == "table" then
+        if bucket.arenaFill == "WHITE" then return false end
+        return bucket.hudColor == "INVERTED"
+      end
+    end
+    return false
+  end
 
   local function resolvedCompatibilityMode()
     if compatMode == AUTO then
@@ -284,6 +355,32 @@ return function(mod)
     return #tostring(text or "") * 8
   end
 
+  local function drawNativeRowInk(G, figure, generation)
+    G.setColor(0, 0, 0, 1)
+    if generation == 2 then
+      -- Gold's $73/$77/$76/$6f player-frame tiles are not the same art as
+      -- Gen 1's frame: the side is four pixels wide and the bottom rule is
+      -- on scanline 6. Draw their exact horizontal mirror.
+      G.rectangle("fill", 9, 24, 4, 11)
+      G.rectangle("fill", 9, 35, 7, 2)
+      G.rectangle("fill", 10, 37, 6, 1)
+      G.rectangle("fill", 80, 35, 2, 1)
+      G.rectangle("fill", 80, 36, 4, 1)
+      G.rectangle("fill", 80, 37, 6, 1)
+      G.rectangle("fill", 11, 38, 77, 1)
+    else
+      -- Gen 1: reproduce the player's native frame pixel-for-pixel with its
+      -- horizontal direction mirrored: a two-pixel stem, two-scanline rule
+      -- and the same four-step half-arrow at the far end.
+      G.rectangle("fill", 11, 24, 2, 11)
+      G.rectangle("fill", 80, 33, 2, 1)
+      G.rectangle("fill", 80, 34, 4, 1)
+      G.rectangle("fill", 11, 35, 75, 1)
+      G.rectangle("fill", 12, 36, 76, 1)
+    end
+    Font.draw(figure, math.max(8, 80 - tileTextWidth(figure)), 24)
+  end
+
   local function drawNativeRow(figure, generation)
     return withGraphics(function(G)
       assert(type(G.setColor) == "function" and type(G.rectangle) == "function",
@@ -291,32 +388,214 @@ return function(mod)
       -- Clear the original rule row before moving the number down one tile.
       G.setColor(1, 1, 1, 1)
       G.rectangle("fill", 8, 24, 88, 16)
-      G.setColor(0, 0, 0, 1)
+      drawNativeRowInk(G, figure, generation)
+    end)
+  end
 
-      if generation == 2 then
-        -- Gold's $73/$77/$76/$6f player-frame tiles are not the same art as
-        -- Gen 1's frame: the side is four pixels wide and the bottom rule is
-        -- on scanline 6.  Draw their exact horizontal mirror.  The first
-        -- rectangle continues the original enemy $6d side at x=9..12, so the
-        -- upper tile beside HP and this moved lower tile form one clean stem.
-        G.rectangle("fill", 9, 24, 4, 11)
-        G.rectangle("fill", 9, 35, 7, 2)
-        G.rectangle("fill", 10, 37, 6, 1)
-        G.rectangle("fill", 80, 35, 2, 1)
-        G.rectangle("fill", 80, 36, 4, 1)
-        G.rectangle("fill", 80, 37, 6, 1)
-        G.rectangle("fill", 11, 38, 77, 1)
-      else
-        -- Gen 1: reproduce the player's native frame pixel-for-pixel with its
-        -- horizontal direction mirrored: a two-pixel stem, two-scanline rule
-        -- and the same four-step half-arrow at the far end.
-        G.rectangle("fill", 11, 24, 2, 11)
-        G.rectangle("fill", 80, 33, 2, 1)
-        G.rectangle("fill", 80, 34, 4, 1)
-        G.rectangle("fill", 11, 35, 75, 1)
-        G.rectangle("fill", 12, 36, 76, 1)
+  -- PotatoVoxel 1.6.3 keeps the battle HUD in the classic 160x144 GB frame.
+  -- It lays a plain white panel at 84% opacity behind the native enemy HUD
+  -- before the engine draws the HUD itself. Extend that exact panel one row
+  -- lower, then redraw the mirrored native frame and HP readout in black.
+  --
+  -- The first transparent replace removes the old lower rule without stacking
+  -- alpha over Potato's existing 0.84 backing. The panel itself stays the same
+  -- 80-pixel width as PotatoVoxel's HUD_RECT.enemy = {8, 0, 80, 32}; the wider
+  -- 88-pixel erase only clears native rule/arrow pixels that need relocating.
+  local function drawPotatoNativeRow(figure, generation)
+    return withGraphics(function(G)
+      assert(type(G.setColor) == "function" and type(G.rectangle) == "function",
+        "graphics primitives unavailable")
+
+      if type(G.setBlendMode) == "function" then
+        local ok = pcall(G.setBlendMode, "replace", "premultiplied")
+        if not ok then pcall(G.setBlendMode, "replace") end
       end
-      Font.draw(figure, math.max(8, 80 - tileTextWidth(figure)), 24)
+      G.setColor(0, 0, 0, 0)
+      G.rectangle("fill", 8, 24, 88, 16)
+
+      if type(G.setBlendMode) == "function" then
+        pcall(G.setBlendMode, "alpha")
+      end
+      G.setColor(1, 1, 1, 0.84)
+      G.rectangle("fill", 8, 24, 80, 16)
+
+      drawNativeRowInk(G, figure, generation)
+    end)
+  end
+
+  local function potatoStagedBattle(state)
+    -- PotatoVoxel 1.6.3 sets this on BattleState immediately before it lays
+    -- down its semi-opaque HUD panels and calls the engine's native draw.
+    -- battle.overlay therefore sees the marker only while Potato is actually
+    -- rendering a staged 3D battle, not merely because the mod is installed.
+    return potatoHandle ~= nil
+      and type(state) == "table"
+      and state.dramaticShapeShot ~= nil
+  end
+
+  -- Battle Art draws its snapped HUD into a transparent 160x144 texture and
+  -- only then blits that texture to the window edge. Inject the Enemy HP row
+  -- into THAT texture rather than painting over the final screen. This lets us
+  -- remove the old bottom rule without inventing an opaque background, extend
+  -- the native bracket downward exactly like the vanilla Enemy HP path, and
+  -- pass the new row through Battle Art's own COLOR / INVERTED shader.
+  local function clearBattleArtLayerRect(G)
+    if type(G.setBlendMode) == "function" then
+      local set = pcall(G.setBlendMode, "replace", "premultiplied")
+      if not set then pcall(G.setBlendMode, "replace") end
+    end
+    G.setColor(0, 0, 0, 0)
+    G.rectangle("fill", 8, 24, 88, 16)
+    if type(G.setBlendMode) == "function" then
+      pcall(G.setBlendMode, "alpha")
+    end
+  end
+
+  local function withLayerCanvas(layer, draw)
+    local G = love and love.graphics
+    if not (G and type(G.getCanvas) == "function"
+        and type(G.setCanvas) == "function"
+        and type(G.setColor) == "function"
+        and type(G.rectangle) == "function") then
+      return false
+    end
+    local prevCanvas = G.getCanvas()
+    local prevBlend, prevAlpha
+    if type(G.getBlendMode) == "function" then
+      prevBlend, prevAlpha = G.getBlendMode()
+    end
+    local ok = pcall(function()
+      G.setCanvas(layer)
+      draw(G)
+    end)
+    if prevCanvas then G.setCanvas(prevCanvas) else G.setCanvas() end
+    if type(G.setBlendMode) == "function" and prevBlend then
+      pcall(G.setBlendMode, prevBlend, prevAlpha)
+    end
+    G.setColor(1, 1, 1, 1)
+    return ok
+  end
+
+  local battleArtLayerHookInstalled = false
+  local function installBattleArtLayerHook()
+    if battleArtLayerHookInstalled then return true end
+    local hud = battleArtBattleHud
+    local original = hud and hud.layerTexture
+    local flip = hud and hud.flipGlyphs
+    if type(original) ~= "function" or type(flip) ~= "function" then
+      return false
+    end
+    if hud._enemyHpLayerTextureWrapped then
+      battleArtLayerHookInstalled = true
+      return true
+    end
+
+    hud.layerTexture = function(w, h, dark, fn, colorMode, colorShadow, battle, ...)
+      local layer = original(w, h, dark, fn, colorMode, colorShadow, battle, ...)
+      if not layer or not enabled or resolvedCompatibilityMode() ~= NATIVE then
+        return layer
+      end
+      if not battleArtStageState(battle) then return layer end
+
+      local view = viewFor(battle)
+      if not (view and view.nativeVisible) then return layer end
+      local figure = formatReadout(view.hp, view.maxHp, format, false)
+      if not figure then return layer end
+
+      withLayerCanvas(layer, function(G)
+        clearBattleArtLayerRect(G)
+
+        -- `colorMode` is the exact boolean Battle Art itself just used for
+        -- this HUD texture: true = COLOR (black ink + light shadow, and also
+        -- ARENA FILL WHITE); false = INVERTED (white ink + dark shadow).
+        -- Feeding our black source row through the same shader guarantees the
+        -- number AND the extended frame switch together, live, with no option
+        -- guessing and no reload.
+        flip(w, h, function()
+          drawNativeRowInk(G, figure, view.generation)
+        end, colorMode, nil, colorShadow)
+      end)
+      return layer
+    end
+
+    hud._enemyHpLayerTextureWrapped = true
+    battleArtLayerHookInstalled = true
+    return true
+  end
+
+  installBattleArtLayerHook()
+
+  local function battleArtPlacement(state)
+    if not battleArtStageState(state) then
+      return nil, "Battle Art staged battle is not active"
+    end
+    local shotFn = battleArtOverworld and battleArtOverworld.shot
+    local snapFn = battleArtOverworld and battleArtOverworld.snapRects
+    if type(shotFn) ~= "function" or type(snapFn) ~= "function" then
+      return nil, "Battle Art HUD geometry export is unavailable"
+    end
+
+    local okShot, shot = pcall(shotFn)
+    if not okShot or type(shot) ~= "table" then
+      return nil, "Battle Art shot is not ready"
+    end
+    local okSnap, _, bands = pcall(snapFn, shot)
+    local enemy = okSnap and type(bands) == "table" and bands.enemy or nil
+    if type(enemy) ~= "table" or type(enemy.x) ~= "number"
+        or type(enemy.y) ~= "number" or type(enemy.scale) ~= "number"
+        or enemy.scale <= 0 then
+      return nil, "Battle Art enemy HUD placement is unavailable"
+    end
+    return { shot = shot, band = enemy }
+  end
+
+  local function drawBattleArtReadout(view)
+    local figure = formatReadout(view.hp, view.maxHp, format, false)
+    if not figure then return false end
+    local placement, why = battleArtPlacement(view.state)
+    if not placement then return false, why end
+
+    return withGraphics(function(G)
+      assert(type(G.setColor) == "function" and type(G.translate) == "function"
+        and type(G.scale) == "function", "screen transform unavailable")
+
+      local shot, band = placement.shot, placement.band
+      local sw, sh
+      if type(G.getDimensions) == "function" then sw, sh = G.getDimensions() end
+      sw, sh = tonumber(sw) or tonumber(shot.pw) or 1,
+               tonumber(sh) or tonumber(shot.ph) or 1
+      local pw = tonumber(shot.pw) or sw
+      local ph = tonumber(shot.ph) or sh
+      local kx = pw > 0 and sw / pw or 1
+      local ky = ph > 0 and sh / ph or 1
+      local hs = band.scale
+
+      -- Battle Art snaps the complete enemy HUD band to the window edge.
+      -- Draw the readout at the same native coordinates Enemy HP uses
+      -- (right-aligned to x=80, y=24), transformed by that exact snap.
+      -- Deliberately do NOT draw the vanilla white clear rectangle/frame: the
+      -- voxel HUD is transparent and only the glyphs should sit over the world.
+      local tx = math.max(8, 80 - tileTextWidth(figure))
+      local x = (band.x + tx * hs) * kx
+      local y = (band.y + 24 * hs) * ky
+
+      G.translate(x, y)
+      G.scale(hs * kx, hs * ky)
+
+      local inverted = battleArtHudIsInverted()
+      if inverted then
+        -- Match Battle Art INVERTED: white ink with a one-GB-pixel dark shadow.
+        G.setColor(0, 0, 0, 0.72)
+        Font.draw(figure, 1, 1)
+        G.setColor(1, 1, 1, 1)
+        Font.draw(figure, 0, 0)
+      else
+        -- Match Battle Art COLOR: black ink with its light one-pixel shadow.
+        G.setColor(1, 1, 1, 0.38)
+        Font.draw(figure, 1, 1)
+        G.setColor(0, 0, 0, 1)
+        Font.draw(figure, 0, 0)
+      end
     end)
   end
 
@@ -414,11 +693,18 @@ return function(mod)
     lastDrawError = nil
 
     if enabled and resolvedCompatibilityMode() == NATIVE
-        and lastView and lastView.nativeVisible then
+        and lastView and lastView.nativeVisible
+        and not battleArtStageState(state) then
       local figure = formatReadout(lastView.hp, lastView.maxHp, format, false)
-      local drawn, err = drawNativeRow(figure, lastView.generation)
+      local drawn, err
+      if potatoStagedBattle(state) then
+        drawn, err = drawPotatoNativeRow(figure, lastView.generation)
+        if drawn then lastDrawBackend = "potato_native_1_6_3" end
+      else
+        drawn, err = drawNativeRow(figure, lastView.generation)
+        if drawn then lastDrawBackend = "native" end
+      end
       nativeRowDrawn = drawn or nativeRowDrawn
-      lastDrawBackend = drawn and "native" or nil
       lastDrawError = err
     end
     return result
@@ -447,12 +733,22 @@ return function(mod)
   mod.hooks:wrap("render.hud", function(next, game, viewport)
     local result = next(game, viewport)
     local mode = resolvedCompatibilityMode()
-    if enabled and lastView and lastView.replacementVisible then
+    if enabled and lastView then
       local drawn, err
-      if mode == GEN3 then
+      if mode == NATIVE and lastView.nativeVisible
+          and battleArtStageState(lastView.state) then
+        if battleArtLayerHookInstalled then
+          -- Already composed into Battle Art's own transparent HUD texture.
+          drawn = true
+          lastDrawBackend = "battle_art_layer"
+        else
+          drawn, err = drawBattleArtReadout(lastView)
+          if drawn then lastDrawBackend = "battle_art_fallback" end
+        end
+      elseif lastView.replacementVisible and mode == GEN3 then
         drawn, err = drawGen3Readout(lastView, viewport)
         if drawn then lastDrawBackend = GEN3 end
-      elseif mode == MODERN then
+      elseif lastView.replacementVisible and mode == MODERN then
         drawn, err = drawModernReadout(lastView, viewport)
         if drawn then lastDrawBackend = MODERN end
       end
@@ -495,7 +791,7 @@ return function(mod)
   end
   mod.exports.ruleMoved = function() return nativeRowDrawn end
   mod.exports.compat = {
-    version = 8,
+    version = 9,
     generation = "shared",
     backend = "battle.overlay + render.hud",
     publicApiMigration = true,
@@ -550,6 +846,17 @@ return function(mod)
     goldNativeOverlayPriority = 200,
     goldNativeOverlayInstalled = function() return overlayInstalled end,
     gen3BattleUiEnabled = function() return gen3Handle ~= nil end,
+    battleArtInstalled = function() return battleArtHandle ~= nil end,
+    battleArtStaged = function()
+      return lastView ~= nil and battleArtStageState(lastView.state) ~= nil
+    end,
+    battleArtHudInverted = battleArtHudIsInverted,
+    battleArtIntegration = "battleStage + exported HUD snap geometry",
+    potatoInstalled = function() return potatoHandle ~= nil end,
+    potatoStaged = function()
+      return lastView ~= nil and potatoStagedBattle(lastView.state)
+    end,
+    potatoIntegration = "PotatoVoxel 1.6.3 classic GB HUD + 0.84 semi-opaque native-row extension",
     goldReplacementUi = function()
       return lastView and lastView.generation == 2 and lastDrawBackend or nil
     end,

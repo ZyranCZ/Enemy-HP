@@ -1,7 +1,7 @@
 {
   "id": "enemy_hp",
   "name": "Enemy HP Readout",
-  "version": "2.3.2",
+  "version": "2.3.7",
   "github": "ZyranCZ/Enemy-HP",
   "api": 2,
   "entry": "main.lua",
@@ -13,10 +13,12 @@
   "optional_dependencies": [
     "gen1_modern_ui",
     "gen3_battle_ui",
-    "DRAMALESS_SHAPE"
+    "BATTLE_ART_VOXEL_FORK",
+    "DRAMALESS_SHAPE",
+    "potato_voxel"
   ],
   "conflicts": [],
-  "description": "Shows enemy HP as exact values or percentages in Gen 1 and Gen 2/Gold, with compatibility modes for Original/Vanilla UI, Gen 3 Inspired UI, and Gen1 Modern UI. Includes an optional complete original battle UI hide mode for replacement UIs.",
+  "description": "Shows enemy HP as exact values or percentages in Gen 1 and Gen 2/Gold, with Battle Art transparent native-row extension, PotatoVoxel 1.6.3 classic-frame semi-opaque native-row extension in black ink, and compatibility modes for Original/Vanilla UI, Gen 3 Inspired UI, and Gen1 Modern UI. Includes an optional complete original battle UI hide mode for replacement UIs.",
   "permissions": [],
   "games": [
     "gen1",
